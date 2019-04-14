@@ -1,0 +1,2685 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Flowchart</title>
+    <meta name="description" content="Interactive flowchart diagram implemented by GoJS in JavaScript for HTML."/>
+    <!-- Copyright 1998-2018 by Northwoods Software Corporation. -->
+    <meta charset="UTF-8">
+    <style type="text/css">
+        #myOverviewDiv {
+            position: absolute;
+            width: 200px;
+            height: 100px;
+            top: 10px;
+            left: 10px;
+            background-color: aliceblue;
+            z-index: 300; /* make sure its in front */
+            border: solid 1px blue;
+        }
+    </style>
+    <script src="../release/go.js"></script>
+    <script src="../assets/js/goSamples.js"></script>  <!-- this is only for the GoJS Samples framework -->
+    <script id="code">
+
+        // For the layout
+        var MINLENGTH = 200;  // this controls the minimum length of any swimlane
+        var MINBREADTH = 100;  // this controls the minimum breadth of any non-collapsed swimlane
+
+        // some shared functions
+
+        // this is called after nodes have been moved
+        function relayoutDiagram() {
+
+            flowStepDiagram.selection.each(function(n) { n.invalidateLayout(); });
+            flowStepDiagram.layoutDiagram();
+          console.log( '1111111111' + flowStepDiagram.layoutDiagram());
+        }
+
+        // compute the minimum size of the whole diagram needed to hold all of the Lane Groups
+        function computeMinPoolSize() {
+            var len = MINLENGTH;
+            flowStepDiagram.findTopLevelGroups().each(function(lane) {
+                var holder = lane.placeholder;
+                if (holder !== null) {
+                    var sz = holder.actualBounds;
+                    len = Math.max(len, sz.height);
+                }
+                var box = lane.selectionObject;
+                // naturalBounds instead of actualBounds to disregard the shape's stroke width
+                len = Math.max(len, box.naturalBounds.height);
+            });
+            return new go.Size(NaN, len);
+        }
+
+        // compute the minimum size for a particular Lane Group
+        function computeLaneSize(lane) {
+            // assert(lane instanceof go.Group);
+            var sz = computeMinLaneSize(lane);
+            if (lane.isSubGraphExpanded) {
+                var holder = lane.placeholder;
+                if (holder !== null) {
+                    var hsz = holder.actualBounds;
+                    sz.width = Math.max(sz.width, hsz.width);
+                }
+            }
+            // minimum breadth needs to be big enough to hold the header
+            var hdr = lane.findObject("HEADER");
+            if (hdr !== null) sz.width = Math.max(sz.width, hdr.actualBounds.width);
+            return sz;
+        }
+
+        // determine the minimum size of a Lane Group, even if collapsed
+        function computeMinLaneSize(lane) {
+            if (!lane.isSubGraphExpanded) return new go.Size(1, MINLENGTH);
+            return new go.Size(MINBREADTH, MINLENGTH);
+        }
+
+
+        // define a custom grid layout that makes sure the length of each lane is the same
+        // and that each lane is broad enough to hold its subgraph
+        function PoolLayout() {
+          go.GridLayout.call(this);
+          this.cellSize = new go.Size(1, 1);
+            this.wrappingColumn = Infinity;
+            this.wrappingWidth = Infinity;
+            this.spacing = new go.Size(0, 0);
+            this.alignment = go.GridLayout.Position;
+        }
+        go.Diagram.inherit(PoolLayout, go.GridLayout);
+
+        /** @override */
+        PoolLayout.prototype.doLayout = function(coll) {
+            var diagram = this.diagram;
+            if (diagram === null) return;
+            diagram.startTransaction("PoolLayout");
+            // make sure all of the Group Shapes are big enough
+            var minsize = computeMinPoolSize();
+            diagram.findTopLevelGroups().each(function(lane) {
+                if (!(lane instanceof go.Group)) return;
+                var shape = lane.selectionObject;
+                if (shape !== null) {  // change the desiredSize to be big enough in both directions
+                    var sz = computeLaneSize(lane);
+                    shape.width = (!isNaN(shape.width)) ? Math.max(shape.width, sz.width) : sz.width;
+                    shape.height = (isNaN(shape.height) ? minsize.height : Math.max(shape.height, minsize.height));
+                    var cell = lane.resizeCellSize;
+                    if (!isNaN(shape.width) && !isNaN(cell.width) && cell.width > 0) shape.width = Math.ceil(shape.width / cell.width) * cell.width;
+                    if (!isNaN(shape.height) && !isNaN(cell.height) && cell.height > 0) shape.height = Math.ceil(shape.height / cell.height) * cell.height;
+                }
+            });
+            // now do all of the usual stuff, according to whatever properties have been set on this GridLayout
+            go.GridLayout.prototype.doLayout.call(this, coll);
+            diagram.commitTransaction("PoolLayout");
+        };
+        // end PoolLayout class
+
+        function initFlowStep() {
+            var $ = go.GraphObject.make;
+
+            flowStepDiagram =
+                $(go.Diagram, "myDiagramFlowStep",
+                    {
+                        // start everything in the middle of the viewport
+                        contentAlignment: go.Spot.TopCenter,
+                        // use a simple layout to stack the top-level Groups next to each other
+                        layout: $(PoolLayout),
+                        // disallow nodes to be dragged to the diagram's background
+                        mouseDrop: function(e) {
+                            e.diagram.currentTool.doCancel();
+                        },
+                        // a clipboard copied node is pasted into the original node's group (i.e. lane).
+                        "commandHandler.copiesGroupKey": true,
+                        // automatically re-layout the swim lanes after dragging the selection
+                        "SelectionMoved": relayoutDiagram,  // this DiagramEvent listener is
+                        "SelectionCopied": relayoutDiagram, // defined above
+                        "animationManager.isEnabled": true,
+                        "undoManager.isEnabled": true,
+                        // allow TextEditingTool to start without selecting first
+                        "textEditingTool.starting": go.TextEditingTool.DoubleClick
+                    });
+
+            // Customize the dragging tool:
+            // When dragging a Node set its opacity to 0.7 and move it to the foreground layer
+            flowStepDiagram.toolManager.draggingTool.doActivate = function() {
+                go.DraggingTool.prototype.doActivate.call(this);
+                this.currentPart.opacity = 0.7;
+                this.currentPart.layerName = "Foreground";
+            }
+            flowStepDiagram.toolManager.draggingTool.doDeactivate = function() {
+                this.currentPart.opacity = 1;
+                this.currentPart.layerName = "";
+                go.DraggingTool.prototype.doDeactivate.call(this);
+            }
+
+            // There are only three note colors by default, blue, red, and yellow but you could add more here:
+            var noteColors = ['#009CCC', '#CC293D', '#FFD700'];
+            function getNoteColor(num) {
+                return noteColors[Math.min(num, noteColors.length - 1)];
+            }
+
+            flowStepDiagram.nodeTemplate =
+                $(go.Node, "Horizontal",
+                    new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
+                    $(go.Shape, "Rectangle", {
+                            fill: '#009CCC', strokeWidth: 1, stroke: '#009CCC',
+                            width: 6, stretch: go.GraphObject.Vertical, alignment: go.Spot.Left,
+                            // if a user clicks the colored portion of a node, cycle through colors
+                            // click: function (e, obj) {
+                            //     flowStepDiagram.startTransaction("Update node color");
+                            //     var newColor = parseInt(obj.part.data.color) + 1;
+                            //     if (newColor > noteColors.length-1) newColor = 0;
+                            //     flowStepDiagram.model.setDataProperty(obj.part.data, "color", newColor);
+                            //     flowStepDiagram.commitTransaction("Update node color");
+                            // }
+                        },
+                        new go.Binding("fill", "color", getNoteColor),
+                        new go.Binding("stroke", "color", getNoteColor)
+                    ),
+                    $(go.Panel, "Auto",
+                        $(go.Shape, "Rectangle", { fill: "white", stroke: '#CCCCCC' }),
+                        $(go.Panel, "Table",
+                            { width: 130, minSize: new go.Size(NaN, 50) },
+                            $(go.TextBlock,
+                                {
+                                    name: 'TEXT',
+                                    margin: 6, font: '14px Lato, sans-serif', editable: true,
+                                    stroke: "#000", maxSize: new go.Size(130, NaN),
+                                    alignment: go.Spot.Center
+                                },
+                                new go.Binding("text", "text").makeTwoWay())
+                        )
+                    )
+                );
+
+            // unmovable node that acts as a button
+            flowStepDiagram.nodeTemplateMap.add('newbutton',
+                $(go.Node, "Horizontal",
+                    {
+                        selectable: false,
+                        click: function(e, node) {
+                            flowStepDiagram.startTransaction('add node');
+                            var newdata = { group:"Problems", loc:"0 50", text: "New item " + node.containingGroup.memberParts.count, color: 0 };
+                            flowStepDiagram.model.addNodeData(newdata);
+                            flowStepDiagram.commitTransaction('add node');
+                            var node = flowStepDiagram.findNodeForData(newdata);
+                            flowStepDiagram.select(node);
+                            flowStepDiagram.commandHandler.editTextBlock();
+                        },
+                        background: 'white'
+                    },
+                    $(go.Panel, "Auto",
+                        $(go.Shape, "Rectangle", { strokeWidth: 0, stroke: null, fill: '#6FB583' }),
+                        $(go.Shape, "PlusLine", { margin: 6, strokeWidth: 2, width: 12, height: 12, stroke: 'white', background: '#6FB583' })
+                    ),
+                    $(go.TextBlock, "New item", { font: '10px Lato, sans-serif', margin: 6,  })
+                )
+            );
+
+            // While dragging, highlight the dragged-over group
+            function highlightGroup(grp, show) {
+                if (show) {
+                    var part = flowStepDiagram.toolManager.draggingTool.currentPart;
+                    if (part.containingGroup !== grp) {
+                        grp.isHighlighted = true;
+                        return;
+                    }
+                }
+                grp.isHighlighted = false;
+            }
+
+            flowStepDiagram.groupTemplate =
+                $(go.Group, "Vertical",
+                    {
+                        selectable: false,
+                        selectionObjectName: "SHAPE", // even though its not selectable, this is used in the layout
+                        layerName: "Background",  // all lanes are always behind all nodes and links
+                        layout: $(go.GridLayout,  // automatically lay out the lane's subgraph
+                            {
+                                wrappingColumn: 1,
+                                cellSize: new go.Size(1, 1),
+                                spacing: new go.Size(5, 5),
+                                alignment: go.GridLayout.Position,
+                                comparer: function(a, b) {  // can re-order tasks within a lane
+                                    var ay = a.location.y;
+                                    var by = b.location.y;
+                                    if (isNaN(ay) || isNaN(by)) return 0;
+                                    if (ay < by) return -1;
+                                    if (ay > by) return 1;
+                                    return 0;
+                                }
+                            }),
+                        click: function(e, grp) {  // allow simple click on group to clear selection
+                            if (!e.shift && !e.control && !e.meta) e.diagram.clearSelection();
+                        },
+                        computesBoundsAfterDrag: true,  // needed to prevent recomputing Group.placeholder bounds too soon
+                        handlesDragDropForMembers: true,  // don't need to define handlers on member Nodes and Links
+                        mouseDragEnter: function(e, grp, prev) { highlightGroup(grp, true); },
+                        mouseDragLeave: function(e, grp, next) { highlightGroup(grp, false); },
+                        mouseDrop: function(e, grp) {  // dropping a copy of some Nodes and Links onto this Group adds them to this Group
+                            // don't allow drag-and-dropping a mix of regular Nodes and Groups
+                            if (e.diagram.selection.all(function(n) { return !(n instanceof go.Group); })) {
+                                var ok = grp.addMembers(grp.diagram.selection, true);
+                                if (!ok) grp.diagram.currentTool.doCancel();
+                            }
+                        },
+                        // subGraphExpandedChanged: function(grp) {
+                        //   var shp = grp.selectionObject;
+                        //   if (grp.diagram.undoManager.isUndoingRedoing) return;
+                        //   if (grp.isSubGraphExpanded) {
+                        //     shp.width = grp._savedBreadth;
+                        //   } else {
+                        //     grp._savedBreadth = shp.width;
+                        //     shp.width = NaN;
+                        //   }
+                        // }
+                    },
+                    new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
+                    // new go.Binding("isSubGraphExpanded", "expanded").makeTwoWay(),
+                    // // the lane header consisting of a TextBlock and an expander button
+                    // $(go.Panel, "Horizontal",
+                    //   { name: "HEADER",
+                    //     angle: 0,  // maybe rotate the header to read sideways going up
+                    //     alignment: go.Spot.Left },
+                    //   $("SubGraphExpanderButton", { margin: 5 }),  // this remains always visible
+                    //   $(go.Panel, "Horizontal",  // this is hidden when the swimlane is collapsed
+                    //     new go.Binding("visible", "isSubGraphExpanded").ofObject(),
+                    //     $(go.TextBlock,  // the lane label
+                    //       { font: "15px Lato, sans-serif", editable: true, margin: new go.Margin(2, 0, 0, 0) },
+                    //       new go.Binding("text", "text").makeTwoWay())
+                    //   )
+                    // ),  // end Horizontal Panel
+                    $(go.Panel, "Auto",  // the lane consisting of a background Shape and a Placeholder representing the subgraph
+                        $(go.Shape, "Rectangle",  // this is the resized object
+                            { name: "SHAPE", fill: "#F1F1F1", stroke: null, strokeWidth: 4 },
+                            new go.Binding("fill", "isHighlighted", function(h) { return h ? "#D6D6D6" : "#F1F1F1"; }).ofObject(),
+                            new go.Binding("desiredSize", "size", go.Size.parse).makeTwoWay(go.Size.stringify)),
+                        $(go.Placeholder,
+                            { padding: 12, alignment: go.Spot.Center }),
+                        // $(go.TextBlock,  // this TextBlock is only seen when the swimlane is collapsed
+                        //   { name: "LABEL",
+                        //     font: "25px Lato, sans-serif", editable: true,
+                        //     angle: 90, alignment: go.Spot.TopLeft, margin: new go.Margin(4, 0, 0, 2) },
+                        //   new go.Binding("visible", "isSubGraphExpanded", function(e) { return !e; }).ofObject(),
+                        //   new go.Binding("text", "text").makeTwoWay())
+                    )  // end Auto Panel
+                );  // end Group
+
+            loadFlowStep();
+
+            // Set up a Part as a legend, and place it directly on the diagram
+            // flowStepDiagram.add(
+            //   $(go.Part, "Table",
+            //     { position: new go.Point(300, 10), selectable: false },
+            //     $(go.TextBlock, "Key",
+            //       { row: 0, font: "700 14px Droid Serif, sans-serif" }),  // end row 0
+            //     $(go.Panel, "Horizontal",
+            //       { row: 1, alignment: go.Spot.Left },
+            //       $(go.Shape, "Rectangle",
+            //         { desiredSize: new go.Size(10, 10), fill: '#CC293D', margin: 5 }),
+            //       $(go.TextBlock, "Halted",
+            //         { font: "700 13px Droid Serif, sans-serif" })
+            //     ),  // end row 1
+            //     $(go.Panel, "Horizontal",
+            //       { row: 2, alignment: go.Spot.Left },
+            //       $(go.Shape, "Rectangle",
+            //         { desiredSize: new go.Size(10, 10), fill: '#FFD700', margin: 5 }),
+            //       $(go.TextBlock, "In Progress",
+            //         { font: "700 13px Droid Serif, sans-serif" })
+            //     ),  // end row 2
+            //     $(go.Panel, "Horizontal",
+            //       { row: 3, alignment: go.Spot.Left },
+            //       $(go.Shape, "Rectangle",
+            //         { desiredSize: new go.Size(10, 10), fill: '#009CCC', margin: 5 }),
+            //       $(go.TextBlock, "Completed",
+            //         { font: "700 13px Droid Serif, sans-serif" })
+            //     )  // end row 3
+            //   ));
+        }
+
+        function loadFlowStep() {
+            flowStepDiagram.model = go.Model.fromJson(document.getElementById("flowStepModel").value);
+            flowStepDiagram.delayInitialization(relayoutDiagram);
+        }
+
+        function init() {
+
+            // 加载流程步骤
+            initFlowStep()
+
+            // 加载其他布局页面
+            // if (window.goSamples) goSamples();  // init for these samples -- you don't need to call this
+            var $ = go.GraphObject.make;  // for conciseness in defining templates
+
+            // each action is represented by a shape and some text
+            var actionTemplate =
+                $(go.Panel, "Horizontal",
+                    // $(go.Shape,
+                    //     { width: 2, height: 2 },
+                    //     // new go.Binding("figure"),
+                    //     // new go.Binding("fill")
+                    // ),
+                    $(go.TextBlock,
+                        {font: "10pt Verdana, sans-serif"},
+                        new go.Binding("text")
+                    )
+                );
+
+            myDiagram =
+                $(go.Diagram, "myDiagramDiv",  // must name or refer to the DIV HTML element
+                    {
+                        initialContentAlignment: go.Spot.Center,
+                        "animationManager.isEnabled": false, // 自动布局
+                        allowDrop: true,  // must be true to accept drops from the Palette
+                        "LinkDrawn": showLinkLabel,  // this DiagramEvent listener is defined below
+                        "LinkRelinked": showLinkLabel,
+                        scrollsPageOnFocus: false,
+                        "undoManager.isEnabled": true,  // enable undo & redo
+                        scale: 0.5,
+                        minScale: 0.5,
+                        maxScale: 2.0
+                        // 强制保持group和其他node的距离
+                        // layout: $(go.TreeLayout,
+                        //     {
+                        //         layerSpacing: 20, nodeSpacing: 10,
+                        //         sorting: go.TreeLayout.SortingAscending
+                        //     })
+                    });
+
+            // when the document is modified, add a "*" to the title and enable the "Save" button
+            myDiagram.addDiagramListener("Modified", function (e) {
+//                console.log("addDiagramListener Modified")
+                var button = document.getElementById("SaveButton");
+                if (button) button.disabled = !myDiagram.isModified;
+                var idx = document.title.indexOf("*");
+                if (myDiagram.isModified) {
+                    if (idx < 0) document.title += "*";
+                } else {
+                    if (idx >= 0) document.title = document.title.substr(0, idx);
+                }
+            });
+
+            myDiagram.addDiagramListener("LinkDrawn", function (e) {
+//                console.log("addDiagramListener LinkDrawn")
+//                console.log(e.subject.data)
+                // (e.subject.data )    //这是这个线条的数据
+                // myDiagram.commandHandler.deleteSelection()
+            });
+
+            // 节点点击事件
+            myDiagram.addDiagramListener("ObjectSingleClicked", function (e) {
+                //Select_Port = e.subject.part.data.key;    e.subject.part.data即获取到的data
+//                console.log("addDiagramListener ObjectSingleClicked");
+//                console.log(e.subject.part.data);
+
+                // 测试自动连线
+                //   var linkData = {"from": "-1", "to":"-2"}
+                //   myDiagram.model.addLinkData(linkData)
+                //   var linkData = {"from": "-2", "to":"-3"}
+                //   myDiagram.model.addLinkData(linkData)
+            });
+
+            // myDiagram.addDiagramListener("LinkRelinked",function(e){
+            //     console.log("addDiagramListener LinkRelinked")
+            //     console.log(e.subject.data )
+            //     // (e.subject.data )    //这是这个线条的数据
+            // }) ;
+            //
+            // myDiagram.addDiagramListener("LinkReshaped",function(e){
+            //     console.log("addDiagramListener LinkReshaped")
+            //     console.log(e.subject.data )
+            //     // (e.subject.data )    //这是这个线条的数据
+            // }) ;
+
+            // ----------------------- dynamic Ports start ---------------------
+            // To simplify this code we define a function for creating a context menu button:
+            function makeButton(text, action, visiblePredicate) {
+                return $("ContextMenuButton",
+                    $(go.TextBlock, text),
+                    {click: action},
+                    // don't bother with binding GraphObject.visible if there's no predicate
+                    visiblePredicate ? new go.Binding("visible", "", function (o, e) {
+                        return o.diagram ? visiblePredicate(o, e) : false;
+                    }).ofObject() : {});
+            }
+
+            // To simplify this code we define a function for creating a context menu button:
+            function makeIntentionButton(text, action, visiblePredicate) {
+                return $("ContextMenuButton",
+                    $(go.TextBlock, text),
+                    {click: action},
+                    // don't bother with binding GraphObject.visible if there's no predicate
+                    visiblePredicate ? new go.Binding("visible", "", function (o, e) {
+                        return o.diagram ? visiblePredicate(o, e) : false;
+                    }).ofObject() : {});
+            }
+
+            var nodeMenu =  // context menu for each Node
+                $(go.Adornment, "Vertical",
+                    makeIntentionButton("添加意图",
+                        function (e, obj) {
+                            addPort("bottom");
+                        }),
+                    makeButton("复制话术",
+                        function(e, obj) { e.diagram.commandHandler.copySelection(); }),
+                    // makeButton("Delete",
+                    //     function(e, obj) { e.diagram.commandHandler.deleteSelection(); }),
+                    // $(go.Shape, "LineH", { strokeWidth: 2, height: 1, stretch: go.GraphObject.Horizontal }),
+                    makeButton("删除话术",
+                        function (e, obj) {
+                            e.diagram.commandHandler.deleteSelection();
+                        })
+                );
+
+            var portSize = new go.Size(54, 26);
+
+            var portMenu =  // context menu for each port
+                $(go.Adornment, "Vertical",
+                    // makeButton("Swap order",
+                    //     function(e, obj) { swapOrder(obj.part.adornedObject); }),
+                    makeButton("删除意图",
+                        // in the click event handler, the obj.part is the Adornment;
+                        // its adornedObject is the port
+                        function (e, obj) {
+                            removePort(obj.part.adornedObject);
+                        })
+                    // makeButton("Change color",
+                    //     function(e, obj) { changeColor(obj.part.adornedObject); }),
+                    // makeButton("Remove side ports",
+                    //     function (e, obj) { removeAll(obj.part.adornedObject); })
+                );
+            // ----------------------- dynamic Ports end ---------------------
+
+            // helper definitions for node templates
+
+            function nodeStyle() {
+                return [
+                    // The Node.location comes from the "loc" property of the node data,
+                    // converted by the Point.parse static method.
+                    // If the Node.location is changed, it updates the "loc" property of the node data,
+                    // converting back using the Point.stringify static method.
+                    new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
+                    {
+                        // the Node.location is at the center of each node
+                        locationSpot: go.Spot.Center
+                    }
+                ];
+            }
+
+            // Define a function for creating a "port" that is normally transparent.
+            // The "name" is used as the GraphObject.portId,
+            // the "align" is used to determine where to position the port relative to the body of the node,
+            // the "spot" is used to control how links connect with the port and whether the port
+            // stretches along the side of the node,
+            // and the boolean "output" and "input" arguments control whether the user can draw links from or to the port.
+            function makePort(name, align, spot, output, input) {
+                var horizontal = align.equals(go.Spot.Top) || align.equals(go.Spot.Bottom);
+                // the port is basically just a transparent rectangle that stretches along the side of the node,
+                // and becomes colored when the mouse passes over it
+                return $(go.Shape,
+                    {
+                        fill: "transparent",  // changed to a color in the mouseEnter event handler
+                        strokeWidth: 0,  // no stroke
+                        width: horizontal ? NaN : 8,  // if not stretching horizontally, just 8 wide
+                        height: !horizontal ? NaN : 8,  // if not stretching vertically, just 8 tall
+                        alignment: align,  // align the port on the main Shape
+                        stretch: (horizontal ? go.GraphObject.Horizontal : go.GraphObject.Vertical),
+                        portId: name,  // declare this object to be a "port"
+                        fromSpot: spot,  // declare where links may connect at this port
+                        fromLinkable: output,  // declare whether the user may draw links from here
+                        toSpot: spot,  // declare where links may connect at this port
+                        toLinkable: input,  // declare whether the user may draw links to here
+                        cursor: "pointer",  // show a different cursor to indicate potential link point
+                        mouseEnter: function (e, port) {  // the PORT argument will be this Shape
+                            if (!e.diagram.isReadOnly) port.fill = "rgba(255,0,255,0.5)";
+                        },
+                        mouseLeave: function (e, port) {
+                            port.fill = "transparent";
+                        }
+                    });
+            }
+
+            function textStyle() {
+                return {
+                    font: "bold 11pt Helvetica, Arial, sans-serif",
+                    stroke: "whitesmoke"
+                }
+            }
+
+            // define the Node templates for regular nodes
+
+            // Step 图标样式
+            myDiagram.nodeTemplateMap.add("",  // the default category
+
+                $(go.Node, "Table",
+                    {
+                        locationObjectName: "BODY",
+                        locationSpot: go.Spot.Center,
+                        selectionObjectName: "BODY",
+                        contextMenu: nodeMenu,
+
+                        selectionAdorned: false,
+                        mouseEnter: function (e, node) {
+//                            console.log("mouseEnter node == ")
+//                            console.log(node)
+
+                            node.linksConnected.each(function (l) {
+//                                console.log("mouseEnter l == ")
+//                                console.log(l)
+                                l.findObject("HIGHLIGHT").stroke = "rgba(30,144,255,0.2)";
+                            });
+                        },
+                        mouseLeave: function (e, node) {
+                            node.linksConnected.each(function (l) {
+//                                console.log("mouseEnter l == ")
+//                                console.log(l)
+                                l.findObject("HIGHLIGHT").stroke = "transparent";
+                            });
+
+                        }
+                    },
+                    nodeStyle(),
+                    new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
+
+                    // the body
+                    $(go.Panel,
+                        "Auto",
+                        {
+                            row: 1, column: 1, name: "BODY",
+                            stretch: go.GraphObject.Fill,
+                        },
+                        $(go.Shape, "Rectangle",
+                            {
+                                fill: "#00A9C9",
+                                stroke: null,
+                                strokeWidth: 0,
+                                minSize: new go.Size(150, 30),
+                                maxSize: new go.Size(240, 120)
+                            }, new go.Binding("figure", "figure")),
+                        $(go.TextBlock,
+                            {
+                                margin: 8, textAlign: "left", font: "11px  Segoe UI,sans-serif",
+                                maxSize: new go.Size(200, NaN),
+                                // wrap: go.TextBlock.WrapFit,
+                                wrap: go.TextBlock.OverflowEllipsis,
+                                editable: true,
+                                stroke: "white", editable: true
+                            },
+                            new go.Binding("text", "name").makeTwoWay()),
+
+                        // four named ports, one on each side:
+                        makePort("T", go.Spot.Top, go.Spot.MiddleTop, false, true),
+                        // makePort("L", go.Spot.Left, go.Spot.TopSide, false, true),
+                        // makePort("R", go.Spot.Right, go.Spot.TopSide, false, true)
+                    ),  // end Auto Panel body
+
+                    // the Panel holding the bottom port elements, which are themselves Panels,
+                    // created for each item in the itemArray, bound to data.bottomArray
+                    $(go.Panel, "Horizontal",
+
+                        new go.Binding("itemArray", "bottomArray"),
+                        {
+                            row: 2, column: 1,
+                            itemTemplate:
+                                $(go.Panel,
+                                    {
+                                        _side: "bottom",
+                                        fromSpot: go.Spot.Bottom, toSpot: go.Spot.Bottom,
+                                        fromLinkable: true, toLinkable: false, cursor: "pointer",
+                                        contextMenu: portMenu
+                                    },
+                                    new go.Binding("portId", "portId"),
+                                    $(go.Shape, "Rectangle",
+                                        {
+                                            stroke: null, strokeWidth: 0,
+                                            desiredSize: portSize,
+                                            margin: new go.Margin(0, 0),
+                                            fill: "#fff",
+                                        },
+                                        new go.Binding("figure", "portColor")),
+                                    $(go.TextBlock, "肯定回答",  // the label
+                                        {
+                                            margin: new go.Margin(4, 0, 0, 0),
+                                            textAlign: "center",
+                                            maxSize: new go.Size(54, 26),
+                                            font: "9pt helvetica, arial, sans-serif",
+                                            stroke: "#00A9C9",
+                                            wrap: go.TextBlock.getEllipsis(),
+                                            editable: true
+                                        },
+                                        new go.Binding("text").makeTwoWay())
+                                )  // end itemTemplate
+                        }
+                    )) // end Horizontal Panel
+            );
+
+            myDiagram.nodeTemplateMap.add("Start",
+                $(go.Node, "Table", nodeStyle(),
+                    $(go.Panel, "Auto",
+                        $(go.Shape, "Circle",
+                            {minSize: new go.Size(40, 40), fill: "#79C900", strokeWidth: 0}),
+                        $(go.TextBlock, "Start", textStyle(),
+                            new go.Binding("name")),
+                    ),
+                    // three named ports, one on each side except the top, all output only:
+                    makePort("B", go.Spot.Bottom, go.Spot.Bottom, true, false),
+                ),
+
+                // new go.Binding("fill", "color"),
+                // new go.Binding("stroke", "isHighlighted",
+                //     function(h) { return h ? highlightColor : "transparent"; })
+                //     .ofObject()
+
+            );
+
+            var groupMenu =  // context menu for each Node
+                $(go.Adornment, "Vertical",
+                    // makeButton("Copy",
+                    //     function(e, obj) { e.diagram.commandHandler.copySelection(); }),
+                    // makeButton("Delete",
+                    //     function(e, obj) { e.diagram.commandHandler.deleteSelection(); }),
+                    // $(go.Shape, "LineH", { strokeWidth: 2, height: 1, stretch: go.GraphObject.Horizontal }),
+                    // makeButton("添加话术",
+                    //     function (e, obj) {
+                    //         console.log("添加话术 =============")
+                    //         console.log(obj.part.adornedObject.data)
+                    //         e.diagram.model.addNodeData({ name: "#9feab9", group: obj.part.adornedObject.data.name,
+                    //             category:"Process", bottomArray:[], key:-9})
+                    //     }),
+                    makeButton("新建话术",
+                        function (e, obj) {
+                            console.log("添加话术 =============")
+                            // console.log(e.diagram.firstInput.jz.x)
+                            // console.log(e.diagram.firstInput.jz.y)
+                            var loc = e.diagram.firstInput.jz.x + " " + e.diagram.firstInput.jz.y
+                            console.log(loc)
+                            e.diagram.model.addNodeData({ name: "#9feab9", group: obj.part.adornedObject.data.name,
+                                category:"Process", loc: loc, bottomArray:[], key:-9})
+                        }),
+                    // makeButton("粘贴话术",
+                    //     function (e, obj) {
+                    //         e.diagram.commandHandler.pasteSelection(e.diagram.lastInput.documentPoint);
+                    //     },
+                    //     function (o) {
+                    //         return o.diagram.commandHandler.canPasteSelection();
+                    //     }),
+                );
+
+            myDiagram.groupTemplate =
+                $(go.Group, "Auto",
+                    { // define the group's internal layout
+                        // 会自动排序
+                        // layout: $(go.TreeLayout,
+                        //     {
+                        //         // angle: 90,
+                        //         arrangement: go.TreeLayout.StyleRootOnly  ,
+                        //         // isRealtime: false
+                        //     }),
+                        // the group begins unexpanded;
+                        // upon expansion, a Diagram Listener will generate contents for the group
+                        isSubGraphExpanded: true,
+                        contextMenu: groupMenu,
+                        selectable: true,
+                        // when a group is expanded, if it contains no parts, generate a subGraph inside of it
+                        subGraphExpandedChanged: function (group) {
+                            if (group.memberParts.count === 0) {
+                                // randomGroup(group.data.key);
+                            }
+
+                            console.log("subGraphExpandedChanged group == " + group)
+                        }
+
+                    },
+                    // $(go.Shape, "Rectangle",
+                    $(go.Shape, {
+                        // fill: "transparent",
+                        fill: "#F1F1F1",
+                        stroke: "gray", strokeWidth: 0
+                    }),
+                    $(go.Panel, "Vertical",
+                        {defaultAlignment: go.Spot.Left, margin: 4},
+                        $(go.Panel, "Horizontal",
+                            {defaultAlignment: go.Spot.Top},
+                            // the SubGraphExpanderButton is a panel that functions as a button to expand or collapse the subGraph
+                            $("SubGraphExpanderButton"),
+                            $(go.TextBlock,
+                                {
+                                    font: "Bold 18px Sans-Serif",
+                                    margin: 4,
+                                    editable: true
+                                },
+                                new go.Binding("text", "name"))
+                        ),
+                        // create a placeholder to represent the area where the contents of the group are
+                        $(go.Placeholder,
+                            {padding: new go.Margin(0, 10)})
+                    )  // end Vertical Panel
+                );  // end Group
+
+            myDiagram.addDiagramListener("ObjectDoubleClicked", function (e) {
+                console.log("addDiagramListener ObjectDoubleClicked");
+                console.log(e);
+            });
+
+            // ------------------------------------------------ 左侧流程图标的样式 end -------------------------------------
+
+
+            // replace the default Link template in the linkTemplateMap
+            myDiagram.linkTemplate =
+                $(go.Link,  // the whole link panel
+                    {
+                        routing: go.Link.AvoidsNodes,
+                        curve: go.Link.JumpGap,
+                        corner: 4, toShortLength: 4,
+                        relinkableFrom: true,
+                        relinkableTo: true,
+                        reshapable: true,
+                        resegmentable: true,
+                        // 鼠标移入移除线条的变化
+                        // mouse-overs subtly highlight links:
+                        mouseEnter: function (e, link) {
+                            link.findObject("HIGHLIGHT").stroke = "rgba(30,144,255,0.2)";
+                        },
+                        mouseLeave: function (e, link) {
+                            link.findObject("HIGHLIGHT").stroke = "transparent";
+                        },
+                        selectionAdorned: false
+                    },
+                    new go.Binding("points").makeTwoWay(),
+                    $(go.Shape,  // the highlight shape, normally transparent
+                        {isPanelMain: true, strokeWidth: 8, stroke: "transparent", name: "HIGHLIGHT"}),
+                    $(go.Shape,  // the link path shape
+                        {isPanelMain: true, stroke: "gray", strokeWidth: 2},
+                        new go.Binding("stroke", "isSelected", function (sel) {
+                            return sel ? "dodgerblue" : "gray";
+                        }).ofObject()),
+                    $(go.Shape,  // the arrowhead
+                        {toArrow: "standard", strokeWidth: 0, fill: "gray"}),
+                    $(go.Panel, "Auto",  // the link label, normally not visible
+                        {visible: false, name: "LABEL", segmentIndex: 2, segmentFraction: 0.5},
+                        new go.Binding("visible", "visible").makeTwoWay(),
+                        $(go.Shape, "RoundedRectangle",  // the label shape
+                            {fill: "#F8F8F8", strokeWidth: 0}),
+                        $(go.TextBlock, "肯定回答",  // the label
+                            {
+                                textAlign: "center",
+                                font: "7pt helvetica, arial, sans-serif",
+                                stroke: "#333333",
+                                editable: true
+                            },
+                            new go.Binding("text").makeTwoWay())
+                    ),
+                );
+
+            // Make link labels visible if coming out of a "conditional" node.
+            // This listener is called by the "LinkDrawn" and "LinkRelinked" DiagramEvents.
+            function showLinkLabel(e) {
+              console.log('222222222222222222' + e);
+              var label = e.subject.findObject("LABEL");
+                // if (label !== null) label.visible = (e.subject.fromNode.data.category === "Conditional");
+                // 显示线上的label
+                if (label !== null) label.visible = false;
+            }
+
+            // temporary links used by LinkingTool and RelinkingTool are also orthogonal:
+            myDiagram.toolManager.linkingTool.temporaryLink.routing = go.Link.Orthogonal;
+            myDiagram.toolManager.relinkingTool.temporaryLink.routing = go.Link.Orthogonal;
+
+            // support double-clicking in the background to add a copy of this data as a node
+            // myDiagram.toolManager.clickCreatingTool.archetypeNodeData = {
+            //     name: "新建话术",
+            //     leftArray: [],
+            //     rightArray: [],
+            //     topArray: [],
+            //     bottomArray: []
+            // };
+
+            myDiagram.contextMenu =
+                $(go.Adornment, "Vertical",
+                    makeButton("新建话术",
+                        function (e, obj) {
+                            console.log("添加话术 =============")
+                            // console.log(e.diagram.contextMenu.ab)
+                            var loc = e.diagram.contextMenu.ab.x + " " + e.diagram.contextMenu.ab.y
+                            console.log(loc)
+                            e.diagram.model.addNodeData({ name: "新建话术", loc: loc, category:"Process", bottomArray:[], key:-9})
+                        }),
+                    makeButton("粘贴话术",
+                        function (e, obj) {
+                            e.diagram.commandHandler.pasteSelection(e.diagram.lastInput.documentPoint);
+                        },
+                        function (o) {
+                            return o.diagram.commandHandler.canPasteSelection();
+                        }),
+                );
+
+
+            load();  // load an initial diagram from some JSON text
+
+            // --------------------------- 添加左侧的流程的图标 start -----------------------------------------
+
+            // initialize the Palette that is on the left side of the page
+            // myPalette =
+            //     $(go.Palette, "myPaletteDiv",  // must name or refer to the DIV HTML element
+            //         {
+            //             scrollsPageOnFocus: false,
+            //             nodeTemplateMap: myDiagram.nodeTemplateMap,  // share the templates used by myDiagram
+            //             model: new go.GraphLinksModel([  // specify the contents of the Palette
+            //                 { category: "Start", text: "Start" },
+            //                 { text: "Step", name: "Step",
+            //                     "bottomArray":[] },
+            //                 { category: "Conditional", text: "???" },
+            //                 { category: "End", text: "End" },
+            //                 { category: "Ports", name: "Ports",
+            //                     "topArray":[ {"portColor":"#77ac1e", "portId":"top0"} ],
+            //                     "bottomArray":[ {"portColor":"#e9701b", "portId":"bottom0"} ]},
+            //                 { category: "Comment", text: "Comment" }
+            //             ])
+            //         });
+
+            // 添加缩略图
+            // Overview
+            myOverview =
+                $(go.Overview, "myOverviewDiv",  // the HTML DIV element for the Overview
+                    {observed: myDiagram, contentAlignment: go.Spot.Center});   // tell it which Diagram to show and pan
+
+        } // end init
+
+
+        // This custom-routing Link class tries to separate parallel links from each other.
+        // This assumes that ports are lined up in a row/column on a side of the node.
+        function CustomLink() {
+            console.log("CustomLink")
+            go.Link.call(this);
+        };
+        go.Diagram.inherit(CustomLink, go.Link);
+
+        CustomLink.prototype.findSidePortIndexAndCount = function (node, port) {
+            var nodedata = node.data;
+            if (nodedata !== null) {
+                var portdata = port.data;
+                var side = port._side;
+                var arr = nodedata[side + "Array"];
+                var len = arr.length;
+                for (var i = 0; i < len; i++) {
+                    if (arr[i] === portdata) return [i, len];
+                }
+            }
+            return [-1, len];
+        };
+
+        /** @override */
+        CustomLink.prototype.computeEndSegmentLength = function (node, port, spot, from) {
+            var esl = go.Link.prototype.computeEndSegmentLength.call(this, node, port, spot, from);
+            var other = this.getOtherPort(port);
+            if (port !== null && other !== null) {
+                var thispt = port.getDocumentPoint(this.computeSpot(from));
+                var otherpt = other.getDocumentPoint(this.computeSpot(!from));
+                if (Math.abs(thispt.x - otherpt.x) > 20 || Math.abs(thispt.y - otherpt.y) > 20) {
+                    var info = this.findSidePortIndexAndCount(node, port);
+                    var idx = info[0];
+                    var count = info[1];
+                    if (port._side == "top" || port._side == "bottom") {
+                        if (otherpt.x < thispt.x) {
+                            return esl + 4 + idx * 8;
+                        } else {
+                            return esl + (count - idx - 1) * 8;
+                        }
+                    } else {  // left or right
+                        if (otherpt.y < thispt.y) {
+                            return esl + 4 + idx * 8;
+                        } else {
+                            return esl + (count - idx - 1) * 8;
+                        }
+                    }
+                }
+            }
+            return esl;
+        };
+
+        /** @override */
+        CustomLink.prototype.hasCurviness = function () {
+            console.log("hasCurviness")
+            if (isNaN(this.curviness)) return true;
+            return go.Link.prototype.hasCurviness.call(this);
+        };
+
+        /** @override */
+        CustomLink.prototype.computeCurviness = function () {
+            console.log("computeCurviness")
+            if (isNaN(this.curviness)) {
+                var fromnode = this.fromNode;
+                var fromport = this.fromPort;
+                var fromspot = this.computeSpot(true);
+                var frompt = fromport.getDocumentPoint(fromspot);
+                var tonode = this.toNode;
+                var toport = this.toPort;
+                var tospot = this.computeSpot(false);
+                var topt = toport.getDocumentPoint(tospot);
+                if (Math.abs(frompt.x - topt.x) > 20 || Math.abs(frompt.y - topt.y) > 20) {
+                    if ((fromspot.equals(go.Spot.Left) || fromspot.equals(go.Spot.Right)) &&
+                        (tospot.equals(go.Spot.Left) || tospot.equals(go.Spot.Right))) {
+                        var fromseglen = this.computeEndSegmentLength(fromnode, fromport, fromspot, true);
+                        var toseglen = this.computeEndSegmentLength(tonode, toport, tospot, false);
+                        var c = (fromseglen - toseglen) / 2;
+                        if (frompt.x + fromseglen >= topt.x - toseglen) {
+                            if (frompt.y < topt.y) return c;
+                            if (frompt.y > topt.y) return -c;
+                        }
+                    } else if ((fromspot.equals(go.Spot.Top) || fromspot.equals(go.Spot.Bottom)) &&
+                        (tospot.equals(go.Spot.Top) || tospot.equals(go.Spot.Bottom))) {
+                        var fromseglen = this.computeEndSegmentLength(fromnode, fromport, fromspot, true);
+                        var toseglen = this.computeEndSegmentLength(tonode, toport, tospot, false);
+                        var c = (fromseglen - toseglen) / 2;
+                        if (frompt.x + fromseglen >= topt.x - toseglen) {
+                            if (frompt.y < topt.y) return c;
+                            if (frompt.y > topt.y) return -c;
+                        }
+                    }
+                }
+            }
+            return go.Link.prototype.computeCurviness.call(this);
+        };
+        // end CustomLink class
+
+
+        // Add a port to the specified side of the selected nodes.
+        function addPort(side) {
+            myDiagram.startTransaction("addPort");
+            myDiagram.selection.each(function (node) {
+                console.log(node)
+                // skip any selected Links
+                if (!(node instanceof go.Node)) return;
+                // compute the next available index number for the side
+                var i = 0;
+                while (node.findPort(side + i.toString()) !== node) i++;
+                // now this new port name is unique within the whole Node because of the side prefix
+                var name = side + i.toString();
+                // get the Array of port data to be modified
+                var arr = node.data[side + "Array"];
+                if (arr) {
+                    // create a new port data object
+                    var newportdata = {
+                        portId: name,
+                        portColor: go.Brush.randomColor()
+                        // if you add port data properties here, you should copy them in copyPortData above
+                    };
+                    // and add it to the Array of port data
+                    myDiagram.model.insertArrayItem(arr, -1, newportdata);
+                }
+            });
+            myDiagram.commitTransaction("addPort");
+        }
+
+        // Remove the clicked port from the node.
+        // Links to the port will be redrawn to the node's shape.
+        function removePort(port) {
+            myDiagram.startTransaction("removePort");
+            var pid = port.portId;
+            var arr = port.panel.itemArray;
+            for (var i = 0; i < arr.length; i++) {
+                if (arr[i].portId === pid) {
+                    myDiagram.model.removeArrayItem(arr, i);
+                    break;
+                }
+            }
+            myDiagram.commitTransaction("removePort");
+        }
+
+        // Remove all ports from the same side of the node as the clicked port.
+        function removeAll(port) {
+            myDiagram.startTransaction("removePorts");
+            var nodedata = port.part.data;
+            var side = port._side;  // there are four property names, all ending in "Array"
+            myDiagram.model.setDataProperty(nodedata, side + "Array", []);  // an empty Array
+            myDiagram.commitTransaction("removePorts");
+        }
+
+        // --------------------------- 添加左侧的流程的图标 end -----------------------------------------
+
+
+        // 保存当前流程图的当前位置
+        // Show the diagram's model in JSON format that the user may edit
+        function save() {
+            document.getElementById("mySavedModel").value = myDiagram.model.toJson();
+            console.log("save myDiagram.model.toJson() == ")
+            console.log(myDiagram.model.toJson())
+            myDiagram.isModified = false;
+        }
+
+        // 通过流程图的位置信息 JSON 加载流程图
+        function load() {
+            myDiagram.model = go.Model.fromJson(document.getElementById("mySavedModel").value);
+        }
+
+        // 打印图表
+        // print the diagram by opening a new window holding SVG images of the diagram contents for each page
+        function printDiagram() {
+            var svgWindow = window.open();
+            if (!svgWindow) return;  // failure to open a new Window
+            var printSize = new go.Size(700, 960);
+            var bnds = myDiagram.documentBounds;
+            var x = bnds.x;
+            var y = bnds.y;
+            while (y < bnds.bottom) {
+                while (x < bnds.right) {
+                    var svg = myDiagram.makeSVG({scale: 1.0, position: new go.Point(x, y), size: printSize});
+                    svgWindow.document.body.appendChild(svg);
+                    x += printSize.width;
+                }
+                x = bnds.x;
+                y += printSize.height;
+            }
+            setTimeout(function () {
+                svgWindow.print();
+            }, 1);
+        }
+
+        // 搜索定位
+        // the Search functionality highlights all of the nodes that have at least one data property match a RegExp
+        function searchDiagram() {  // called by button
+            var input = document.getElementById("mySearch");
+            if (!input) return;
+            input.focus();
+
+            myDiagram.startTransaction("highlight search");
+
+            if (input.value) {
+                // search four different data properties for the string, any of which may match for success
+                // create a case insensitive RegExp from what the user typed
+                var regex = new RegExp(input.value, "i");
+                var results = myDiagram.findNodesByExample({ name: regex },
+                    { nation: regex },
+                    { title: regex },
+                    { headOf: regex });
+                myDiagram.highlightCollection(results);
+                // try to center the diagram at the first node that was found
+                if (results.count > 0) myDiagram.centerRect(results.first().actualBounds);
+            } else {  // empty string only clears highlighteds collection
+                myDiagram.clearHighlighteds();
+            }
+
+            myDiagram.commitTransaction("highlight search");
+        }
+
+        // 缩放
+        function zoomScale() {
+            myDiagram.scale += 0.1
+        }
+    </script>
+</head>
+<body onload="init()">
+<div></div>
+<div id="sample">
+    <div style="width: 100%; display: flex; justify-content: space-between">
+        <!-- 左侧流程框的视图 -->
+        <!--<div id="myPaletteDiv" style="width: 100px; margin-right: 2px; background-color: whitesmoke; border: solid 1px black"></div>-->
+
+        <button onclick="zoomScale()">Zoom</button>
+        <div id="myDiagramFlowStep" style="width:180px; height:500px;"></div>
+        <!-- 流程图的画布 -->
+        <div id="myDiagramDiv" style="flex-grow: 1; height: 750px; border: solid 1px black"></div>
+        <div id="myOverviewDiv" style="margin-left: 222px;margin-top: 5px"></div>
+        <input type="search" id="mySearch" onkeypress="if (event.keyCode === 13) searchDiagram()" />
+        <button onclick="searchDiagram()">Search</button>
+        <!-- Styled in a <style> tag at the top of the html page -->
+    </div>
+    <!--<p>-->
+    <!--The FlowChart sample demonstrates several key features of GoJS,-->
+    <!--namely <a href="../intro/palette.html">Palette</a>s,-->
+    <!--<a href="../intro/links.html">Linkable nodes</a>, Drag/Drop behavior,-->
+    <!--<a href="../intro/textBlocks.html">Text Editing</a>, and the use of-->
+    <!--<a href="../intro/templateMaps.html">Node Template Maps</a> in Diagrams.-->
+    <!--</p>-->
+    <!--<p>-->
+    <!--Mouse-over a Node to view its ports.-->
+    <!--Drag from these ports to create new Links.-->
+    <!--Selecting Links allows you to re-shape and re-link them.-->
+    <!--Selecting a Node and then clicking its TextBlock will allow-->
+    <!--you to edit text (except on the Start and End Nodes).-->
+    <!--</p>-->
+    <button id="SaveButton" onclick="save()">Save</button>
+    <button onclick="load()">Load</button>
+    Diagram Model saved in JSON format:
+    <textarea id="mySavedModel" style="width:100%;height:300px">
+{
+    "class": "go.GraphLinksModel",
+    "copiesArrayObjects": true,
+    "copiesArrays": true,
+    "linkDataArray": [
+        {
+            "from": "#f5b7f0",
+            "to": "#a69f80"
+        },
+        {
+            "from": -1,
+            "fromPort": "B",
+            "points": [
+                175,
+                24.273340092148892,
+                175,
+                34.27334009214889,
+                175,
+                36,
+                236.16666666666646,
+                36,
+                236.16666666666646,
+                93.47998046874977,
+                236.16666666666646,
+                103.47998046874977
+            ],
+            "to": -6,
+            "toPort": "T"
+        },
+        {
+            "from": -6,
+            "fromPort": "bottom2",
+            "points": [
+                251.16666666666646,
+                215.52001953124977,
+                251.16666666666646,
+                225.52001953124977,
+                417.0143229166665,
+                225.52001953124977,
+                417.0143229166665,
+                156.983984375,
+                555.8619791666665,
+                156.983984375,
+                555.8619791666665,
+                166.983984375
+            ],
+            "to": -10,
+            "toPort": "T"
+        },
+        {
+            "from": -6,
+            "fromPort": "bottom4",
+            "points": [
+                359.16666666666646,
+                215.52001953124977,
+                359.16666666666646,
+                225.52001953124977,
+                417.0143229166665,
+                225.52001953124977,
+                417.0143229166665,
+                156.983984375,
+                555.8619791666665,
+                156.983984375,
+                555.8619791666665,
+                166.983984375
+            ],
+            "to": -10,
+            "toPort": "T"
+        },
+        {
+            "from": -6,
+            "fromPort": "bottom1",
+            "points": [
+                197.16666666666646,
+                215.52001953124977,
+                197.16666666666646,
+                225.52001953124977,
+                197.16666666666646,
+                254.8353352864583,
+                271.1953124999999,
+                254.8353352864583,
+                271.1953124999999,
+                284.15065104166683,
+                271.1953124999999,
+                294.15065104166683
+            ],
+            "to": -11,
+            "toPort": "T"
+        },
+        {
+            "from": -6,
+            "fromPort": "bottom3",
+            "points": [
+                305.16666666666646,
+                215.52001953124977,
+                305.16666666666646,
+                225.52001953124977,
+                305.16666666666646,
+                254.8353352864583,
+                271.1953124999999,
+                254.8353352864583,
+                271.1953124999999,
+                284.15065104166683,
+                271.1953124999999,
+                294.15065104166683
+            ],
+            "to": -11,
+            "toPort": "T"
+        },
+        {
+            "from": -10,
+            "fromPort": "bottom1",
+            "points": [
+                528.8619791666665,
+                265.016015625,
+                528.8619791666665,
+                275.016015625,
+                528.8619791666665,
+                292.41666666666674,
+                511.5286458333332,
+                292.41666666666674,
+                511.5286458333332,
+                309.81731770833346,
+                511.5286458333332,
+                319.81731770833346
+            ],
+            "to": -12,
+            "toPort": "T"
+        },
+        {
+            "from": -10,
+            "fromPort": "bottom3",
+            "points": [
+                636.8619791666665,
+                265.016015625,
+                636.8619791666665,
+                275.016015625,
+                636.8619791666665,
+                292.41666666666674,
+                511.5286458333332,
+                292.41666666666674,
+                511.5286458333332,
+                309.81731770833346,
+                511.5286458333332,
+                319.81731770833346
+            ],
+            "to": -12,
+            "toPort": "T"
+        },
+        {
+            "from": -12,
+            "fromPort": "bottom1",
+            "points": [
+                484.5286458333332,
+                417.84934895833345,
+                484.5286458333332,
+                427.84934895833345,
+                484.5286458333332,
+                466.2540039062501,
+                705.1953125000006,
+                466.2540039062501,
+                705.1953125000006,
+                504.6586588541668,
+                705.1953125000006,
+                514.6586588541668
+            ],
+            "to": -13,
+            "toPort": "T"
+        },
+        {
+            "from": -12,
+            "fromPort": "bottom3",
+            "points": [
+                592.5286458333333,
+                417.84934895833345,
+                592.5286458333333,
+                427.84934895833345,
+                592.5286458333333,
+                466.2540039062501,
+                705.1953125000006,
+                466.2540039062501,
+                705.1953125000006,
+                504.6586588541668,
+                705.1953125000006,
+                514.6586588541668
+            ],
+            "to": -13,
+            "toPort": "T"
+        },
+        {
+            "from": -11,
+            "fromPort": "bottom1",
+            "points": [
+                244.1953124999999,
+                392.1826822916668,
+                244.1953124999999,
+                402.1826822916668,
+                244.1953124999999,
+                449.9206705729168,
+                307.36197916666646,
+                449.9206705729168,
+                307.36197916666646,
+                497.65865885416673,
+                307.36197916666646,
+                507.65865885416673
+            ],
+            "to": -7,
+            "toPort": "T"
+        },
+        {
+            "from": -11,
+            "fromPort": "bottom3",
+            "points": [
+                352.1953124999999,
+                392.1826822916668,
+                352.1953124999999,
+                402.1826822916668,
+                352.1953124999999,
+                449.9206705729168,
+                307.36197916666646,
+                449.9206705729168,
+                307.36197916666646,
+                497.65865885416673,
+                307.36197916666646,
+                507.65865885416673
+            ],
+            "to": -7,
+            "toPort": "T"
+        },
+        {
+            "from": -14,
+            "fromPort": "bottom1",
+            "points": [
+                -213.33333333333366,
+                615.6866861979166,
+                -213.33333333333366,
+                625.6866861979166,
+                -213.33333333333366,
+                658.5040039062501,
+                -134.80468750000023,
+                658.5040039062501,
+                -134.80468750000023,
+                691.3213216145837,
+                -134.80468750000023,
+                701.3213216145837
+            ],
+            "to": -17,
+            "toPort": "T"
+        },
+        {
+            "from": -14,
+            "fromPort": "bottom3",
+            "points": [
+                -105.33333333333366,
+                615.6866861979166,
+                -105.33333333333366,
+                625.6866861979166,
+                -105.33333333333366,
+                658.5040039062501,
+                -134.80468750000023,
+                658.5040039062501,
+                -134.80468750000023,
+                691.3213216145837,
+                -134.80468750000023,
+                701.3213216145837
+            ],
+            "to": -17,
+            "toPort": "T"
+        },
+        {
+            "from": -17,
+            "fromPort": "bottom1",
+            "points": [
+                -161.80468750000023,
+                785.3453450520836,
+                -161.80468750000023,
+                795.3453450520836,
+                -161.80468750000023,
+                809.2520019531253,
+                -121.97135416666691,
+                809.2520019531253,
+                -121.97135416666691,
+                823.1586588541669,
+                -121.97135416666691,
+                833.1586588541669
+            ],
+            "to": -15,
+            "toPort": "T"
+        },
+        {
+            "from": -17,
+            "fromPort": "bottom3",
+            "points": [
+                -53.80468750000023,
+                785.3453450520836,
+                -53.80468750000023,
+                795.3453450520836,
+                -53.80468750000023,
+                809.2520019531253,
+                -121.97135416666691,
+                809.2520019531253,
+                -121.97135416666691,
+                823.1586588541669,
+                -121.97135416666691,
+                833.1586588541669
+            ],
+            "to": -15,
+            "toPort": "T"
+        },
+        {
+            "from": -6,
+            "fromPort": "bottom0",
+            "points": [
+                143.16666666666646,
+                215.52001953124977,
+                143.16666666666646,
+                225.52001953124977,
+                143.16666666666646,
+                228,
+                -186.33333333333366,
+                228,
+                -186.33333333333366,
+                493.64664713541663,
+                -186.33333333333366,
+                503.64664713541663
+            ],
+            "to": -14,
+            "toPort": "T"
+        },
+        {
+            "from": -12,
+            "fromPort": "bottom0",
+            "points": [
+                430.5286458333332,
+                417.84934895833345,
+                430.5286458333332,
+                427.84934895833345,
+                430.5286458333332,
+                428,
+                -186.33333333333366,
+                428,
+                -186.33333333333366,
+                493.64664713541663,
+                -186.33333333333366,
+                503.64664713541663
+            ],
+            "to": -14,
+            "toPort": "T"
+        },
+        {
+            "from": -12,
+            "fromPort": "bottom2",
+            "points": [
+                538.5286458333333,
+                417.84934895833345,
+                538.5286458333333,
+                427.84934895833345,
+                538.5286458333333,
+                428,
+                -186.33333333333366,
+                428,
+                -186.33333333333366,
+                493.64664713541663,
+                -186.33333333333366,
+                503.64664713541663
+            ],
+            "to": -14,
+            "toPort": "T"
+        },
+        {
+            "from": -11,
+            "fromPort": "bottom0",
+            "points": [
+                190.1953124999999,
+                392.1826822916668,
+                190.1953124999999,
+                402.1826822916668,
+                190.1953124999999,
+                404,
+                -186.33333333333366,
+                404,
+                -186.33333333333366,
+                493.64664713541663,
+                -186.33333333333366,
+                503.64664713541663
+            ],
+            "to": -14,
+            "toPort": "T"
+        },
+        {
+            "from": -11,
+            "fromPort": "bottom2",
+            "points": [
+                298.1953124999999,
+                392.1826822916668,
+                298.1953124999999,
+                402.1826822916668,
+                298.1953124999999,
+                404,
+                -186.33333333333366,
+                404,
+                -186.33333333333366,
+                493.64664713541663,
+                -186.33333333333366,
+                503.64664713541663
+            ],
+            "to": -14,
+            "toPort": "T"
+        },
+        {
+            "from": -16,
+            "fromPort": "bottom1",
+            "points": [
+                235.83333333333314,
+                958.6786783854167,
+                235.83333333333314,
+                968.6786783854167,
+                235.83333333333314,
+                972.9146647135417,
+                258.36197916666663,
+                972.9146647135417,
+                258.36197916666663,
+                977.1506510416668,
+                258.36197916666663,
+                987.1506510416668
+            ],
+            "to": -18,
+            "toPort": "T"
+        },
+        {
+            "from": -14,
+            "fromPort": "bottom0",
+            "points": [
+                -267.33333333333366,
+                615.6866861979166,
+                -267.33333333333366,
+                625.6866861979166,
+                -267.33333333333366,
+                628,
+                262.83333333333314,
+                628,
+                262.83333333333314,
+                864.6546549479167,
+                262.83333333333314,
+                874.6546549479167
+            ],
+            "to": -16,
+            "toPort": "T"
+        },
+        {
+            "from": -14,
+            "fromPort": "bottom2",
+            "points": [
+                -159.33333333333366,
+                615.6866861979166,
+                -159.33333333333366,
+                625.6866861979166,
+                -159.33333333333366,
+                628,
+                262.83333333333314,
+                628,
+                262.83333333333314,
+                864.6546549479167,
+                262.83333333333314,
+                874.6546549479167
+            ],
+            "to": -16,
+            "toPort": "T"
+        },
+        {
+            "from": -17,
+            "fromPort": "bottom2",
+            "points": [
+                -107.80468750000023,
+                785.3453450520836,
+                -107.80468750000023,
+                795.3453450520836,
+                -107.80468750000023,
+                796,
+                262.83333333333314,
+                796,
+                262.83333333333314,
+                864.6546549479167,
+                262.83333333333314,
+                874.6546549479167
+            ],
+            "to": -16,
+            "toPort": "T"
+        },
+        {
+            "from": -17,
+            "fromPort": "bottom0",
+            "points": [
+                -215.80468750000023,
+                785.3453450520836,
+                -215.80468750000023,
+                795.3453450520836,
+                -215.80468750000023,
+                796,
+                262.83333333333314,
+                796,
+                262.83333333333314,
+                864.6546549479167,
+                262.83333333333314,
+                874.6546549479167
+            ],
+            "to": -16,
+            "toPort": "T"
+        },
+        {
+            "from": -19,
+            "fromPort": "bottom0",
+            "points": [
+                331.1981981981981,
+                1195.9139138161597,
+                331.1981981981981,
+                1205.9139138161597,
+                331.1981981981981,
+                1212.8873873873872,
+                271.91511824324346,
+                1212.8873873873872,
+                271.91511824324346,
+                1219.860860958615,
+                271.91511824324346,
+                1229.860860958615
+            ],
+            "to": -9,
+            "toPort": "T"
+        },
+        {
+            "from": -19,
+            "fromPort": "bottom1",
+            "points": [
+                385.1981981981981,
+                1195.9139138161597,
+                385.1981981981981,
+                1205.9139138161597,
+                385.1981981981981,
+                1209.4759761226069,
+                944.4826858108108,
+                1209.4759761226069,
+                944.4826858108108,
+                1213.0380384290543,
+                944.4826858108108,
+                1223.0380384290543
+            ],
+            "to": -22,
+            "toPort": "T"
+        },
+        {
+            "from": -19,
+            "fromPort": "bottom3",
+            "points": [
+                493.1981981981981,
+                1195.9139138161597,
+                493.1981981981981,
+                1205.9139138161597,
+                493.1981981981981,
+                1222.1556557045326,
+                675.5872043918918,
+                1222.1556557045326,
+                675.5872043918918,
+                1238.3973975929055,
+                675.5872043918918,
+                1248.3973975929055
+            ],
+            "to": -21,
+            "toPort": "T"
+        },
+        {
+            "from": -16,
+            "fromPort": "bottom2",
+            "points": [
+                289.83333333333314,
+                958.6786783854167,
+                289.83333333333314,
+                968.6786783854167,
+                289.83333333333314,
+                972,
+                412.1981981981981,
+                972,
+                412.1981981981981,
+                1129.9059060036598,
+                412.1981981981981,
+                1139.9059060036598
+            ],
+            "to": -19,
+            "toPort": "T"
+        },
+        {
+            "from": -23,
+            "fromPort": "bottom2",
+            "points": [
+                476.9011451488595,
+                1528.9543928766268,
+                476.9011451488595,
+                1538.9543928766268,
+                476.9011451488595,
+                1557.1983870172521,
+                472.42979098219297,
+                1557.1983870172521,
+                472.42979098219297,
+                1575.4423811578772,
+                472.42979098219297,
+                1585.4423811578772
+            ],
+            "to": -24,
+            "toPort": "T"
+        },
+        {
+            "from": -9,
+            "fromPort": "bottom0",
+            "points": [
+                271.91511824324346,
+                1285.8688687711149,
+                271.91511824324346,
+                1295.8688687711149,
+                271.91511824324346,
+                1292,
+                271.91511824324346,
+                1292,
+                271.91511824324346,
+                1332,
+                476.9011451488595,
+                1332,
+                476.9011451488595,
+                1462.9463850641268,
+                476.9011451488595,
+                1472.9463850641268
+            ],
+            "to": -23,
+            "toPort": "T"
+        },
+        {
+            "from": -19,
+            "fromPort": "bottom2",
+            "points": [
+                439.1981981981981,
+                1195.9139138161597,
+                439.1981981981981,
+                1205.9139138161597,
+                439.1981981981981,
+                1204,
+                439.1981981981981,
+                1204,
+                439.1981981981981,
+                1332,
+                476.9011451488595,
+                1332,
+                476.9011451488595,
+                1462.9463850641268,
+                476.9011451488595,
+                1472.9463850641268
+            ],
+            "to": -23,
+            "toPort": "T"
+        },
+        {
+            "from": -21,
+            "fromPort": "bottom2",
+            "points": [
+                675.5872043918918,
+                1318.4134132179054,
+                675.5872043918918,
+                1328.4134132179054,
+                675.5872043918918,
+                1332,
+                476.9011451488595,
+                1332,
+                476.9011451488595,
+                1462.9463850641268,
+                476.9011451488595,
+                1472.9463850641268
+            ],
+            "to": -23,
+            "toPort": "T"
+        },
+        {
+            "from": -26,
+            "fromPort": "bottom1",
+            "points": [
+                309.23042260178164,
+                1880.221571231896,
+                309.23042260178164,
+                1890.221571231896,
+                309.23042260178164,
+                1906.4533033546436,
+                373.53834771439404,
+                1906.4533033546436,
+                373.53834771439404,
+                1922.6850354773912,
+                373.53834771439404,
+                1932.6850354773912
+            ],
+            "to": -27,
+            "toPort": "T"
+        },
+        {
+            "from": -26,
+            "fromPort": "bottom3",
+            "points": [
+                417.23042260178164,
+                1880.221571231896,
+                417.23042260178164,
+                1890.221571231896,
+                417.23042260178164,
+                1906.4533033546436,
+                373.53834771439404,
+                1906.4533033546436,
+                373.53834771439404,
+                1922.6850354773912,
+                373.53834771439404,
+                1932.6850354773912
+            ],
+            "to": -27,
+            "toPort": "T"
+        },
+        {
+            "from": -26,
+            "fromPort": "bottom2",
+            "points": [
+                363.23042260178164,
+                1880.221571231896,
+                363.23042260178164,
+                1890.221571231896,
+                363.23042260178164,
+                1907.117467469931,
+                705.8122075116917,
+                1907.117467469931,
+                705.8122075116917,
+                1924.0133637079657,
+                705.8122075116917,
+                1934.0133637079657
+            ],
+            "to": -29,
+            "toPort": "T"
+        },
+        {
+            "from": -27,
+            "fromPort": "bottom3",
+            "points": [
+                454.53834771439404,
+                2030.7170667273913,
+                454.53834771439404,
+                2040.7170667273913,
+                454.53834771439404,
+                2049.6179680681853,
+                496.75815345763795,
+                2049.6179680681853,
+                496.75815345763795,
+                2058.5188694089793,
+                496.75815345763795,
+                2068.5188694089793
+            ],
+            "to": -28,
+            "toPort": "T"
+        },
+        {
+            "from": -27,
+            "fromPort": "bottom0",
+            "points": [
+                346.53834771439404,
+                2030.7170667273913,
+                346.53834771439404,
+                2040.7170667273913,
+                346.53834771439404,
+                2049.6179680681853,
+                496.75815345763795,
+                2049.6179680681853,
+                496.75815345763795,
+                2058.5188694089793,
+                496.75815345763795,
+                2068.5188694089793
+            ],
+            "to": -28,
+            "toPort": "T"
+        },
+        {
+            "from": -29,
+            "fromPort": "bottom1",
+            "points": [
+                678.8122075116917,
+                2018.0373871454658,
+                678.8122075116917,
+                2028.0373871454658,
+                678.8122075116917,
+                2043.2781282772225,
+                496.75815345763795,
+                2043.2781282772225,
+                496.75815345763795,
+                2058.5188694089793,
+                496.75815345763795,
+                2068.5188694089793
+            ],
+            "to": -28,
+            "toPort": "T"
+        },
+        {
+            "from": -29,
+            "fromPort": "bottom2",
+            "points": [
+                732.8122075116917,
+                2018.0373871454658,
+                732.8122075116917,
+                2028.0373871454658,
+                732.8122075116917,
+                2043.2781282772225,
+                496.75815345763795,
+                2043.2781282772225,
+                496.75815345763795,
+                2058.5188694089793,
+                496.75815345763795,
+                2068.5188694089793
+            ],
+            "to": -28,
+            "toPort": "T"
+        },
+        {
+            "from": -29,
+            "fromPort": "bottom3",
+            "points": [
+                786.8122075116917,
+                2018.0373871454658,
+                786.8122075116917,
+                2028.0373871454658,
+                786.8122075116917,
+                2043.2781282772225,
+                496.75815345763795,
+                2043.2781282772225,
+                496.75815345763795,
+                2058.5188694089793,
+                496.75815345763795,
+                2068.5188694089793
+            ],
+            "to": -28,
+            "toPort": "T"
+        },
+        {
+            "from": -31,
+            "fromPort": "bottom1",
+            "points": [
+                223.56510180739332,
+                2405.620862076648,
+                223.56510180739332,
+                2415.620862076648,
+                223.56510180739332,
+                2436.3320736299984,
+                203.71536926234856,
+                2436.3320736299984,
+                203.71536926234856,
+                2457.043285183349,
+                203.71536926234856,
+                2467.043285183349
+            ],
+            "to": -33,
+            "toPort": "T"
+        },
+        {
+            "from": -31,
+            "fromPort": "bottom2",
+            "points": [
+                277.5651018073933,
+                2405.620862076648,
+                277.5651018073933,
+                2415.620862076648,
+                277.5651018073933,
+                2439.3453368443847,
+                447.35951340649245,
+                2439.3453368443847,
+                447.35951340649245,
+                2463.0698116121216,
+                447.35951340649245,
+                2473.0698116121216
+            ],
+            "to": -32,
+            "toPort": "T"
+        },
+        {
+            "from": -26,
+            "fromPort": "bottom0",
+            "points": [
+                255.23042260178164,
+                1880.221571231896,
+                255.23042260178164,
+                1890.221571231896,
+                255.23042260178164,
+                1892,
+                204,
+                1892,
+                204,
+                2196,
+                250.56510180739332,
+                2196,
+                250.56510180739332,
+                2297.588830826648,
+                250.56510180739332,
+                2307.588830826648
+            ],
+            "to": -31,
+            "toPort": "T"
+        },
+        {
+            "from": -29,
+            "fromPort": "bottom0",
+            "points": [
+                624.8122075116917,
+                2018.0373871454658,
+                624.8122075116917,
+                2028.0373871454658,
+                624.8122075116917,
+                2028,
+                624.8122075116917,
+                2028,
+                624.8122075116917,
+                2044,
+                404,
+                2044,
+                404,
+                2196,
+                250.56510180739332,
+                2196,
+                250.56510180739332,
+                2297.588830826648,
+                250.56510180739332,
+                2307.588830826648
+            ],
+            "to": -31,
+            "toPort": "T"
+        },
+        {
+            "from": -27,
+            "fromPort": "bottom2",
+            "points": [
+                292.53834771439404,
+                2030.7170667273913,
+                292.53834771439404,
+                2040.7170667273913,
+                292.53834771439404,
+                2044,
+                204,
+                2044,
+                204,
+                2196,
+                250.56510180739332,
+                2196,
+                250.56510180739332,
+                2297.588830826648,
+                250.56510180739332,
+                2307.588830826648
+            ],
+            "to": -31,
+            "toPort": "T"
+        },
+        {
+            "from": -27,
+            "fromPort": "bottom1",
+            "points": [
+                400.53834771439404,
+                2030.7170667273913,
+                400.53834771439404,
+                2040.7170667273913,
+                400.53834771439404,
+                2044,
+                400.53834771439404,
+                2044,
+                400.53834771439404,
+                2196,
+                250.56510180739332,
+                2196,
+                250.56510180739332,
+                2297.588830826648,
+                250.56510180739332,
+                2307.588830826648
+            ],
+            "to": -31,
+            "toPort": "T"
+        },
+        {
+            "from": -24,
+            "fromPort": "bottom0",
+            "points": [
+                472.42979098219297,
+                1655.4583967828771,
+                472.42979098219297,
+                1665.4583967828771,
+                472.42979098219297,
+                1668,
+                336.23042260178164,
+                1668,
+                336.23042260178164,
+                1772.189539981896,
+                336.23042260178164,
+                1782.189539981896
+            ],
+            "to": -26,
+            "toPort": "T"
+        }
+    ],
+    "linkFromPortIdProperty": "fromPort",
+    "linkToPortIdProperty": "toPort",
+    "nodeDataArray": [
+        {
+            "category": "Start",
+            "key": -1,
+            "loc": "175 0",
+            "name": "Start"
+        },
+        {
+            "isGroup": true,
+            "key": "group0",
+            "name": "开场白"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#bc919a",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#a2aabf",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8da19b",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#c7dcf2",
+                    "portId": "bottom3",
+                    "text": "否定"
+                },
+                {
+                    "portColor": "#96adbe",
+                    "portId": "bottom4",
+                    "text": "特殊"
+                }
+            ],
+            "category": "Process",
+            "group": "group0",
+            "key": -6,
+            "leftArray": [],
+            "loc": "251.16666666666646 146.49999999999977",
+            "name": "喂，您好, （停顿2s）您好，我这边是专业办理银行信用贷款和抵押贷款的。月息在5，6厘左右，（语气高昂兴奋）请问您最近有没有资金周转的需求啊？~",
+            "rightArray": [],
+            "topArray": []
+        },
+        {
+            "bottomArray": [],
+            "category": "Process",
+            "group": "group0",
+            "key": -7,
+            "loc": "307.36197916666646 529.6666666666667",
+            "name": "嗯~那没关系，我就先不打扰，感谢您的接听，再见！"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#9ee2ac",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#b4cbf5",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#cea1bb",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#b2ddc3",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group0",
+            "key": -10,
+            "loc": "555.8619791666665 203",
+            "name": "哦是这样的，我这边是专业办理银行信用贷款和抵押贷款的。月息在5，6厘左右，冒昧给您打电话是想问下您最近有资金周转的需要吗？"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#f1c0d4",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#8186ec",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8eb0da",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#89f5c7",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group0",
+            "key": -11,
+            "loc": "271.1953124999999 330.16666666666686",
+            "name": "您也不要这么快拒绝嘛~我们是专业做银行贷款的，利息是真的很优惠（恳切语气），您也可以先了解一下贷款的市场行情，留个备用啊"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#aad581",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#f5fcc8",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#d1a582",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#9efbab",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group0",
+            "key": -12,
+            "loc": "511.5286458333332 355.8333333333335",
+            "name": "您也不要这么快拒绝嘛~我们是专业做银行贷款的，利息是真的很优惠（恳切语气），您也可以先了解一下贷款的市场行情，留个备用啊"
+        },
+        {
+            "bottomArray": [],
+            "category": "Process",
+            "group": "group0",
+            "key": -13,
+            "loc": "705.1953125000006 536.6666666666667",
+            "name": "嗯~那没关系，我就先不打扰，感谢您的接听，再见！"
+        },
+        {
+            "isGroup": true,
+            "key": "group2",
+            "name": "业务介绍"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#bc919a",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#a2aabf",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8da19b",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#c7dcf2",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group2",
+            "key": -14,
+            "leftArray": [],
+            "loc": "-186.33333333333366 546.6666666666666",
+            "name": "我们这边和四大行以及各大商业银行都有合作的，利息低，额度高，下款也快，还可以根据您的需求为您配置最合适的贷款组合。您看这边有需求的话，咱们现在聊一聊可以吗？",
+            "rightArray": [],
+            "topArray": []
+        },
+        {
+            "bottomArray": [],
+            "category": "Process",
+            "group": "group2",
+            "key": -15,
+            "loc": "-121.97135416666691 855.1666666666669",
+            "name": "嗯~那没关系，我就先不打扰，感谢您的接听，再见！"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#f1c0d4",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#8186ec",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8eb0da",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#89f5c7",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group2",
+            "key": -17,
+            "loc": "-134.80468750000023 730.3333333333337",
+            "name": "我们的利息啊是真的很优惠的（语气恳切），如果您近期有资金需求，为什么不再考虑一下呢？"
+        },
+        {
+            "isGroup": true,
+            "key": "group3",
+            "name": "了解情况"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#a2aabf",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8da19b",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                }
+            ],
+            "category": "Process",
+            "group": "group3",
+            "key": -16,
+            "leftArray": [],
+            "loc": "262.83333333333314 903.6666666666667",
+            "name": "嗯嗯，好的呐~我这边先了解一下哈，您大概需要多少资金呢？",
+            "rightArray": [],
+            "topArray": []
+        },
+        {
+            "bottomArray": [],
+            "category": "Process",
+            "group": "group3",
+            "key": -18,
+            "loc": "258.36197916666663 1023.1666666666669",
+            "name": "哦~那也没有关系嘛，后续如果您有需要也是可以直接联系我的呢，这边就先不打扰了，祝您生活愉快，再见！"
+        },
+        {
+            "isGroup": true,
+            "key": "group4",
+            "name": "询问情况"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#bc919a",
+                    "portId": "bottom0",
+                    "text": "做生意"
+                },
+                {
+                    "portColor": "#a2aabf",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8da19b",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#c7dcf2",
+                    "portId": "bottom3",
+                    "text": "上班"
+                }
+            ],
+            "category": "Process",
+            "group": "group4",
+            "key": -19,
+            "leftArray": [],
+            "loc": "412.1981981981981 1154.9099099099099",
+            "name": "那您这边目前是在上班还是做生意呢",
+            "rightArray": [],
+            "topArray": []
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#8eb0da",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                }
+            ],
+            "category": "Process",
+            "group": "group4",
+            "key": -21,
+            "loc": "675.5872043918918 1270.4054054054054",
+            "name": "那您单位给您缴纳社保公积金吗？"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#a9c8d2",
+                    "portId": "bottom0",
+                    "text": "未识别"
+                }
+            ],
+            "category": "Process",
+            "group": "group4",
+            "key": -9,
+            "loc": "271.91511824324346 1244.864864864865",
+            "name": "那您应该有营业执照吧？"
+        },
+        {
+            "bottomArray": [],
+            "category": "Process",
+            "group": "group4",
+            "key": -22,
+            "loc": "944.4826858108108 1259.0540540540542",
+            "name": "嗯嗯~那也没有关系嘛，当然如果您后续有需要记得直接联系我哦，这边就先不打扰了，祝您生活愉快，再见！"
+        },
+        {
+            "isGroup": true,
+            "key": "group5",
+            "name": "询问房产"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#8da19b",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                }
+            ],
+            "category": "Process",
+            "group": "group5",
+            "key": -23,
+            "leftArray": [],
+            "loc": "476.9011451488595 1487.950388970377",
+            "name": "那您名下有房产吗？",
+            "rightArray": [],
+            "topArray": []
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#d8b09e",
+                    "portId": "bottom0",
+                    "text": "未识别"
+                }
+            ],
+            "category": "Process",
+            "group": "group5",
+            "key": -24,
+            "loc": "472.42979098219297 1607.4503889703772",
+            "name": "哦哦~好的，那再问一下哈，您名下有车吗？"
+        },
+        {
+            "isGroup": true,
+            "key": "group6",
+            "name": "邀约"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#bc919a",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#a2aabf",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8da19b",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#c7dcf2",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group6",
+            "key": -26,
+            "leftArray": [],
+            "loc": "336.23042260178164 1818.2055556068958",
+            "name": "好的呢，这边大概情况我也了解了，稍后晚一点的时候我再让咱们客户经理与您联系，给您做一个具体的沟通，您看可以吗？",
+            "rightArray": [],
+            "topArray": []
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#8eb0da",
+                    "portId": "bottom2",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#80ab8f",
+                    "portId": "bottom0",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#da8aba",
+                    "portId": "bottom1",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#94deb9",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group6",
+            "key": -27,
+            "loc": "373.53834771439404 1968.7010511023911",
+            "name": "咱们是正规合作机构，而且您看咱们都聊这么久了，说您没有兴趣小应还是不信的呢，具体就让咱们客户经理与您沟通一下，您看好吧？"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#a9c8d2",
+                    "portId": "bottom0",
+                    "text": "未识别"
+                }
+            ],
+            "category": "Process",
+            "group": "group6",
+            "key": -28,
+            "loc": "496.75815345763795 2111.5388889402293",
+            "name": "嗯，那也没关系哈，反正后续如果有需要记得随时联系我哦，这边就先不打扰了，祝您生活愉快，再见！"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#b4a5c6",
+                    "portId": "bottom0",
+                    "text": "肯定"
+                },
+                {
+                    "portColor": "#90e4ea",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#a9d2d8",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                },
+                {
+                    "portColor": "#fee796",
+                    "portId": "bottom3",
+                    "text": "否定"
+                }
+            ],
+            "category": "Process",
+            "group": "group6",
+            "key": -29,
+            "loc": "705.8122075116917 1963.0253754267158",
+            "name": "我看您这边也是挺感兴趣得嘛，要不具体的我让咱们客户经理和您沟通一下，您看可以吗？"
+        },
+        {
+            "isGroup": true,
+            "key": "group7",
+            "name": "结束"
+        },
+        {
+            "bottomArray": [
+                {
+                    "portColor": "#a2aabf",
+                    "portId": "bottom1",
+                    "text": "拒绝"
+                },
+                {
+                    "portColor": "#8da19b",
+                    "portId": "bottom2",
+                    "text": "未识别"
+                }
+            ],
+            "category": "Process",
+            "group": "group7",
+            "key": -31,
+            "leftArray": [],
+            "loc": "250.56510180739332 2343.604846451648",
+            "name": "您看哈（配合一点点笑声），咱们聊了这么久，还不知道怎么称呼您呢，请问您贵姓呢？",
+            "rightArray": [],
+            "topArray": []
+        },
+        {
+            "bottomArray": [],
+            "category": "Process",
+            "group": "group7",
+            "key": -32,
+            "loc": "447.35951340649245 2495.077819424622",
+            "name": "嗯~那没关系，我就先不打扰，感谢您的接听，再见！"
+        },
+        {
+            "bottomArray": [],
+            "category": "Process",
+            "group": "group7",
+            "key": -33,
+            "loc": "203.71536926234836 2496.0552969020987",
+            "name": "我们的利息啊是真的很优惠的（语气恳切），如果您近期有资金需求，为什么不再考虑一下呢？"
+        }
+    ]
+}
+  </textarea>
+
+    <textarea id="flowStepModel" style="width:100%;height:300px">
+{ "class": "go.GraphLinksModel",
+  "nodeDataArray": [
+{"key":"Problems", "text":"Problems", "isGroup":true, "loc":"0 23.52284749830794" },
+{"key":-1, "group":"Problems", "category":"newbutton",  "loc":"12 35.52284749830794" },
+{"key":1, "text":"text for oneA", "group":"Problems", "color":"0", "loc":"12 35.52284749830794"},
+{"key":2, "text":"text for oneB", "group":"Problems", "color":"1", "loc":"12 65.52284749830794"},
+{"key":3, "text":"text for oneC", "group":"Problems", "color":"0", "loc":"12 95.52284749830794"},
+{"key":4, "text":"text for oneD", "group":"Problems", "color":"1", "loc":"12 125.52284749830794"}
+],
+  "linkDataArray": []}
+  </textarea>
+    <button onclick="printDiagram()">Print Diagram Using SVG</button>
+</div>
+</body>
+</html>
